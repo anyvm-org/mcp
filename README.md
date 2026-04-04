@@ -1,13 +1,13 @@
-# anyvm-skill
+# anyvm-mcp
 
-> AI agent skill for **anyvm** — run, manage, and debug BSD/Illumos VMs with natural language.  
+> MCP server for **anyvm** — run, manage, and debug BSD/Illumos VMs with natural language.  
 > Works with **Claude Code**, **GitHub Copilot**, and any other [MCP](https://modelcontextprotocol.io)-compatible AI assistant.
 
 ---
 
 ## Overview
 
-**anyvm-skill** is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that bridges AI coding assistants with the [anyvm](https://anyvm.org) VM manager.  
+**anyvm-mcp** is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that bridges AI coding assistants with the [anyvm](https://anyvm.org) VM manager.  
 Once installed, your AI assistant can:
 
 - 🖥️ **Create** FreeBSD, OpenBSD, NetBSD, OmniOS, and other BSD/Illumos VMs in seconds
@@ -32,14 +32,14 @@ Once installed, your AI assistant can:
 ## Installation
 
 ```bash
-pip install anyvm-skill
+pip install anyvm-mcp
 ```
 
 Or install from source:
 
 ```bash
-git clone https://github.com/anyvm-org/anyvm-skill
-cd anyvm-skill
+git clone https://github.com/anyvm-org/mcp
+cd mcp
 pip install -e .
 ```
 
@@ -55,7 +55,7 @@ Add the server to `~/.claude/mcp.json` (or the project-level `.claude/mcp.json`)
 {
   "mcpServers": {
     "anyvm": {
-      "command": "anyvm-skill"
+      "command": "anyvm-mcp"
     }
   }
 }
@@ -76,7 +76,7 @@ Add the server to `.vscode/mcp.json` in your workspace (or the user-level settin
   "servers": {
     "anyvm": {
       "type": "stdio",
-      "command": "anyvm-skill"
+      "command": "anyvm-mcp"
     }
   }
 }
@@ -84,10 +84,10 @@ Add the server to `.vscode/mcp.json` in your workspace (or the user-level settin
 
 ### Generic MCP client (HTTP/SSE)
 
-Run anyvm-skill as an HTTP server:
+Run anyvm-mcp as an HTTP server:
 
 ```bash
-anyvm-skill --transport sse --host 127.0.0.1 --port 8000
+anyvm-mcp --transport sse --host 127.0.0.1 --port 8000
 ```
 
 Then point your MCP client at `http://127.0.0.1:8000/sse`.
@@ -97,7 +97,7 @@ Then point your MCP client at `http://127.0.0.1:8000/sse`.
 ## CLI reference
 
 ```
-usage: anyvm-skill [-h] [--anyvm PATH] [--transport {stdio,sse,streamable-http}]
+usage: anyvm-mcp [-h] [--anyvm PATH] [--transport {stdio,sse,streamable-http}]
                    [--host HOST] [--port PORT]
 
 options:

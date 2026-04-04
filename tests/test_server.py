@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
-from anyvm_skill.server import create_server
-from anyvm_skill.vm_manager import AnyvmError, SnapshotInfo, VmInfo
+from anyvm_mcp.server import create_server
+from anyvm_mcp.vm_manager import AnyvmError, SnapshotInfo, VmInfo
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ class TestToolRegistration:
 class TestListVmsTool:
     @pytest.mark.asyncio
     async def test_returns_list(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "list_vms", return_value=[_VM1, _VM2]):
             raw = await server.call_tool("list_vms", {})
 
@@ -96,7 +96,7 @@ class TestListVmsTool:
 
     @pytest.mark.asyncio
     async def test_returns_error_on_failure(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "list_vms", side_effect=AnyvmError("CLI missing")):
             raw = await server.call_tool("list_vms", {})
 
@@ -107,7 +107,7 @@ class TestListVmsTool:
 class TestVmInfoTool:
     @pytest.mark.asyncio
     async def test_returns_info(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "vm_info", return_value=_VM1):
             raw = await server.call_tool("vm_info", {"name": "vm1"})
 
@@ -117,7 +117,7 @@ class TestVmInfoTool:
 
     @pytest.mark.asyncio
     async def test_returns_error_on_failure(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "vm_info", side_effect=AnyvmError("not found")):
             raw = await server.call_tool("vm_info", {"name": "missing"})
 
@@ -128,7 +128,7 @@ class TestVmInfoTool:
 class TestCreateVmTool:
     @pytest.mark.asyncio
     async def test_creates_vm(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "create_vm", return_value=_VM1):
             raw = await server.call_tool(
                 "create_vm",
@@ -140,7 +140,7 @@ class TestCreateVmTool:
 
     @pytest.mark.asyncio
     async def test_error_propagated(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "create_vm", side_effect=AnyvmError("name conflict")):
             raw = await server.call_tool("create_vm", {"name": "dup", "os": "freebsd-14"})
 
@@ -151,21 +151,21 @@ class TestCreateVmTool:
 class TestStartStopDestroyTools:
     @pytest.mark.asyncio
     async def test_start_vm(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "start_vm", return_value="VM started"):
             raw = await server.call_tool("start_vm", {"name": "vm1"})
         assert "started" in _result(raw).lower()
 
     @pytest.mark.asyncio
     async def test_stop_vm(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "stop_vm", return_value="VM stopped"):
             raw = await server.call_tool("stop_vm", {"name": "vm1"})
         assert "stopped" in _result(raw).lower()
 
     @pytest.mark.asyncio
     async def test_destroy_vm(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "destroy_vm", return_value="destroyed"):
             raw = await server.call_tool("destroy_vm", {"name": "vm1"})
         assert "destroyed" in _result(raw).lower()
@@ -174,7 +174,7 @@ class TestStartStopDestroyTools:
 class TestExecInVmTool:
     @pytest.mark.asyncio
     async def test_exec(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "exec_in_vm", return_value="FreeBSD 14.0"):
             raw = await server.call_tool(
                 "exec_in_vm", {"name": "vm1", "command": "uname -r"}
@@ -185,14 +185,14 @@ class TestExecInVmTool:
 class TestSnapshotTools:
     @pytest.mark.asyncio
     async def test_list_snapshots(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "list_snapshots", return_value=[_SNAP1]):
             raw = await server.call_tool("list_snapshots", {"name": "vm1"})
         assert _result(raw)[0]["name"] == "snap1"
 
     @pytest.mark.asyncio
     async def test_create_snapshot(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "create_snapshot", return_value=_SNAP1):
             raw = await server.call_tool(
                 "create_snapshot", {"name": "vm1", "snapshot_name": "snap1"}
@@ -201,7 +201,7 @@ class TestSnapshotTools:
 
     @pytest.mark.asyncio
     async def test_restore_snapshot(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "restore_snapshot", return_value="restored"):
             raw = await server.call_tool(
                 "restore_snapshot", {"name": "vm1", "snapshot_name": "snap1"}
@@ -210,7 +210,7 @@ class TestSnapshotTools:
 
     @pytest.mark.asyncio
     async def test_delete_snapshot(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "delete_snapshot", return_value="deleted"):
             raw = await server.call_tool(
                 "delete_snapshot", {"name": "vm1", "snapshot_name": "snap1"}
@@ -221,7 +221,7 @@ class TestSnapshotTools:
 class TestNetworkInfoTool:
     @pytest.mark.asyncio
     async def test_network_info(self, server):
-        from anyvm_skill.vm_manager import VmManager
+        from anyvm_mcp.vm_manager import VmManager
         with patch.object(
             VmManager, "network_info", return_value={"ip": "10.0.0.1", "mac": "aa:bb:cc:00:11:22"}
         ):

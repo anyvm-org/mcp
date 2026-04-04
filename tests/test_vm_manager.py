@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from anyvm_skill.vm_manager import AnyvmError, SnapshotInfo, VmInfo, VmManager
+from anyvm_mcp.vm_manager import AnyvmError, SnapshotInfo, VmInfo, VmManager
 
 
 # ---------------------------------------------------------------------------
