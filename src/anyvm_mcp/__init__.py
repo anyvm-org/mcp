@@ -1,4 +1,4 @@
-"""anyvm-mcp: MCP server for anyvm — run, manage, and debug BSD/Illumos VMs."""
+"""anyvm-mcp: MCP server for anyvm VM management — run, manage, and debug BSD/Illumos VMs."""
 
 from anyvm_mcp.server import create_server, main
 
