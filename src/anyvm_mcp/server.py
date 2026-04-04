@@ -8,15 +8,15 @@ Supported transports
 
 Quickstart (stdio)::
 
-    pip install anyvm-skill
-    anyvm-skill          # starts the MCP server on stdin/stdout
+    pip install anyvm-mcp
+    anyvm-mcp          # starts the MCP server on stdin/stdout
 
 Claude Code (``~/.claude/mcp.json``)::
 
     {
       "mcpServers": {
         "anyvm": {
-          "command": "anyvm-skill"
+          "command": "anyvm-mcp"
         }
       }
     }
@@ -27,7 +27,7 @@ VS Code / GitHub Copilot (``.vscode/mcp.json``)::
       "servers": {
         "anyvm": {
           "type": "stdio",
-          "command": "anyvm-skill"
+          "command": "anyvm-mcp"
         }
       }
     }
@@ -41,14 +41,14 @@ from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
 
-from anyvm_skill.vm_manager import AnyvmError, VmManager
+from anyvm_mcp.vm_manager import AnyvmError, VmManager
 
 # ---------------------------------------------------------------------------
 # Server instance
 # ---------------------------------------------------------------------------
 
 _INSTRUCTIONS = """\
-You are connected to the anyvm skill. Use the provided tools to run, manage,
+You are connected to the anyvm MCP server. Use the provided tools to run, manage,
 and debug BSD/Illumos virtual machines via anyvm. Prefer the most targeted
 tool for each task (e.g. use exec_in_vm to run a single diagnostic command
 rather than opening a full interactive session).
@@ -69,7 +69,7 @@ def create_server(anyvm_path: str | None = None) -> FastMCP:
             *None* the binary is looked up on ``PATH``.
     """
     mcp: FastMCP = FastMCP(
-        name="anyvm-skill",
+        name="anyvm-mcp",
         instructions=_INSTRUCTIONS,
     )
     mgr = VmManager(anyvm_path=anyvm_path)
@@ -351,9 +351,9 @@ def create_server(anyvm_path: str | None = None) -> FastMCP:
 
 
 def main() -> None:
-    """Entry point for the ``anyvm-skill`` command."""
+    """Entry point for the ``anyvm-mcp`` command."""
     parser = argparse.ArgumentParser(
-        prog="anyvm-skill",
+        prog="anyvm-mcp",
         description="MCP server that lets AI assistants manage BSD/Illumos VMs via anyvm.",
     )
     parser.add_argument(

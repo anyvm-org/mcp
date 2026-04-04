@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "anyvm-skill"
+name = "anyvm-mcp"
 version = "0.1.0"
-description = "AI agent skill for anyvm — run, manage, and debug BSD/Illumos VMs with natural language"
+description = "MCP server for anyvm — run, manage, and debug BSD/Illumos VMs with natural language"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-keywords = ["anyvm", "mcp", "ai", "skill", "bsd", "illumos", "vm", "virtualization"]
+keywords = ["anyvm", "mcp", "ai", "bsd", "illumos", "vm", "virtualization"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -33,15 +33,15 @@ dev = [
 ]
 
 [project.scripts]
-anyvm-skill = "anyvm_skill.server:main"
+anyvm-mcp = "anyvm_mcp.server:main"
 
 [project.urls]
 Homepage = "https://anyvm.org"
-Repository = "https://github.com/anyvm-org/anyvm-skill"
-Issues = "https://github.com/anyvm-org/anyvm-skill/issues"
+Repository = "https://github.com/anyvm-org/mcp"
+Issues = "https://github.com/anyvm-org/mcp/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/anyvm_skill"]
+packages = ["src/anyvm_mcp"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
