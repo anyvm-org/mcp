@@ -8,7 +8,7 @@ anyvm-version = "v0.3.2"
 
 [project]
 name = "anyvm-mcp"
-version = "0.0.1"
+version = "0.0.2"
 description = "MCP server for anyvm — run, manage, and debug BSD/Illumos VMs with natural language"
 readme = "README.md"
 license = { file = "LICENSE" }

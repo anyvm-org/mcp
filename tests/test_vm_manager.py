@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from anyvm_mcp.vm_manager import AnyvmError, SnapshotInfo, VmInfo, VmManager
+from anyvm_mcp.vm_manager import AnyvmError, SnapshotInfo, VmInfo, VmManager, _vendored_anyvm
 
 
 # ---------------------------------------------------------------------------
@@ -257,3 +259,81 @@ class TestNetworkInfo:
         with patch("subprocess.run", return_value=_make_completed(payload)):
             info = mgr.network_info("my-vm")
         assert "interfaces" in info
+
+
+# ---------------------------------------------------------------------------
+# Vendored anyvm.py tests
+# ---------------------------------------------------------------------------
+
+
+class TestVendoredAnyvm:
+    def test_vendored_anyvm_returns_path_when_file_exists(self, tmp_path):
+        vendor_dir = tmp_path / "vendor"
+        vendor_dir.mkdir()
+        anyvm_file = vendor_dir / "anyvm.py"
+        anyvm_file.write_text("# fake anyvm")
+
+        with patch("anyvm_mcp.vm_manager.os.path.dirname", return_value=str(tmp_path)):
+            result = _vendored_anyvm()
+        assert result is not None
+        assert result.endswith("anyvm.py")
+
+    def test_vendored_anyvm_returns_none_when_missing(self, tmp_path):
+        with patch("anyvm_mcp.vm_manager.os.path.dirname", return_value=str(tmp_path)):
+            result = _vendored_anyvm()
+        assert result is None
+
+
+class TestVmManagerInit:
+    def test_explicit_path_no_python(self):
+        mgr = VmManager(anyvm_path="/custom/anyvm")
+        assert mgr._anyvm == "/custom/anyvm"
+        assert mgr._use_python is False
+
+    def test_vendored_uses_python(self, tmp_path):
+        vendor_dir = tmp_path / "vendor"
+        vendor_dir.mkdir()
+        (vendor_dir / "anyvm.py").write_text("# fake")
+
+        with patch("anyvm_mcp.vm_manager._vendored_anyvm", return_value=str(vendor_dir / "anyvm.py")):
+            mgr = VmManager()
+        assert mgr._anyvm == str(vendor_dir / "anyvm.py")
+        assert mgr._use_python is True
+
+    def test_fallback_to_path(self):
+        with patch("anyvm_mcp.vm_manager._vendored_anyvm", return_value=None):
+            with patch("shutil.which", return_value="/usr/bin/anyvm"):
+                mgr = VmManager()
+        assert mgr._anyvm == "/usr/bin/anyvm"
+        assert mgr._use_python is False
+
+    def test_fallback_to_default(self):
+        with patch("anyvm_mcp.vm_manager._vendored_anyvm", return_value=None):
+            with patch("shutil.which", return_value=None):
+                mgr = VmManager()
+        assert mgr._anyvm == "anyvm"
+        assert mgr._use_python is False
+
+
+class TestRunWithVendored:
+    def test_run_uses_sys_executable_for_vendored(self):
+        with patch("anyvm_mcp.vm_manager._vendored_anyvm", return_value="/pkg/vendor/anyvm.py"):
+            mgr = VmManager()
+
+        with patch("subprocess.run", return_value=_make_completed("ok")) as mock_run:
+            mgr._run("list")
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == sys.executable
+        assert cmd[1] == "/pkg/vendor/anyvm.py"
+        assert cmd[2] == "list"
+
+    def test_run_direct_for_explicit_path(self):
+        mgr = VmManager(anyvm_path="/usr/local/bin/anyvm")
+
+        with patch("subprocess.run", return_value=_make_completed("ok")) as mock_run:
+            mgr._run("list")
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "/usr/local/bin/anyvm"
+        assert cmd[1] == "list"
