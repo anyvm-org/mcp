@@ -1,6 +1,10 @@
 [build-system]
-requires = ["hatchling==1.29.0"]
+requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.hooks.custom]
+path = "build_hook.py"
+anyvm-version = "v0.3.2"
 
 [project]
 name = "anyvm-mcp"

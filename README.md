@@ -24,12 +24,19 @@ Once installed, your AI assistant can:
 | Requirement | Notes |
 |-------------|-------|
 | Python ≥ 3.10 | |
-| `anyvm` CLI | Must be installed and on `PATH`. See [anyvm.org](https://anyvm.org). |
 | An MCP-compatible AI assistant | Claude Code, GitHub Copilot in VS Code, or any other MCP client |
+
+> **Note:** The `anyvm` CLI is bundled automatically — no separate installation needed.
 
 ---
 
 ## Installation
+
+```bash
+pipx install anyvm-mcp
+```
+
+Or with pip:
 
 ```bash
 pip install anyvm-mcp
@@ -101,7 +108,7 @@ usage: anyvm-mcp [-h] [--anyvm PATH] [--transport {stdio,sse,streamable-http}]
                    [--host HOST] [--port PORT]
 
 options:
-  --anyvm PATH          Path to the anyvm binary (default: looked up on PATH)
+  --anyvm PATH          Path to the anyvm binary (default: bundled version)
   --transport           MCP transport: stdio (default), sse, or streamable-http
   --host HOST           Bind host for HTTP transports (default: 127.0.0.1)
   --port PORT           Bind port for HTTP transports (default: 8000)

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -81,11 +83,29 @@ class SnapshotInfo:
         }
 
 
+def _vendored_anyvm() -> str | None:
+    """Return the path to the vendored anyvm.py, or *None* if not bundled."""
+    vendor = os.path.join(os.path.dirname(__file__), "vendor", "anyvm.py")
+    if os.path.isfile(vendor):
+        return vendor
+    return None
+
+
 class VmManager:
     """Manages BSD/Illumos virtual machines via the anyvm CLI."""
 
     def __init__(self, anyvm_path: str | None = None) -> None:
-        self._anyvm = anyvm_path or shutil.which("anyvm") or "anyvm"
+        if anyvm_path:
+            self._anyvm = anyvm_path
+            self._use_python = False
+        else:
+            vendored = _vendored_anyvm()
+            if vendored:
+                self._anyvm = vendored
+                self._use_python = True
+            else:
+                self._anyvm = shutil.which("anyvm") or "anyvm"
+                self._use_python = False
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -97,7 +117,10 @@ class VmManager:
         Raises:
             AnyvmError: if the command exits with a non-zero status.
         """
-        cmd = [self._anyvm, *args]
+        if self._use_python:
+            cmd = [sys.executable, self._anyvm, *args]
+        else:
+            cmd = [self._anyvm, *args]
         try:
             result = subprocess.run(
                 cmd,
