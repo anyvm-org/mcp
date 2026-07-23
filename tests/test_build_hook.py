@@ -19,7 +19,7 @@ def hook(tmp_path):
     src_dir.mkdir(parents=True)
 
     mock_hook = MagicMock(spec=AnyvmDownloadHook)
-    mock_hook.config = {"anyvm-version": "v0.3.2"}
+    mock_hook.config = {"anyvm-version": "v0.5.2"}
     mock_hook.initialize = AnyvmDownloadHook.initialize.__get__(mock_hook)
     mock_hook.finalize = AnyvmDownloadHook.finalize.__get__(mock_hook)
 
@@ -39,7 +39,7 @@ class TestAnyvmDownloadHook:
         assert (vendor_dir / "__init__.py").exists()
         mock_dl.assert_called_once()
         call_url = mock_dl.call_args[0][0]
-        assert "v0.3.2" in call_url
+        assert "v0.5.2" in call_url
         assert call_url.endswith("/anyvm.py")
 
     def test_initialize_uses_configured_version(self, hook, tmp_path):
@@ -62,7 +62,7 @@ class TestAnyvmDownloadHook:
                 mock_hook.initialize("0.0.1", {})
 
         call_url = mock_dl.call_args[0][0]
-        assert "v0.3.2" in call_url
+        assert "v0.5.2" in call_url
 
     def test_finalize_removes_vendor_dir(self, hook, tmp_path):
         mock_hook, _ = hook

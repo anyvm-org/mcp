@@ -1,4 +1,5 @@
-"""anyvm-mcp: MCP server for anyvm VM management — run, manage, and debug BSD/Illumos VMs."""
+"""anyvm-mcp: MCP server for anyvm -- boot and manage BSD, illumos, Linux,
+Haiku, Android, GNU Hurd, and Plan 9 guest VMs."""
 
 from anyvm_mcp.server import create_server, main
 

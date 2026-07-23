@@ -1,3 +1,6 @@
+# Build-time vendored anyvm.py (downloaded by build_hook.py)
+src/anyvm_mcp/vendor/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -2,9 +2,9 @@
 
 Supported transports
 --------------------
-* **stdio** (default) — works out-of-the-box with Claude Code, GitHub Copilot,
+* **stdio** (default) -- works out-of-the-box with Claude Code, GitHub Copilot,
   and any MCP-compatible agent that launches the server as a subprocess.
-* **HTTP/SSE** — run with ``--transport sse --port <port>`` for web-based clients.
+* **HTTP/SSE** -- run with ``--transport sse --port <port>`` for web-based clients.
 
 Quickstart (stdio)::
 
@@ -48,54 +48,130 @@ from anyvm_mcp.vm_manager import AnyvmError, VmManager
 # ---------------------------------------------------------------------------
 
 _INSTRUCTIONS = """\
-You are connected to the anyvm MCP server. Use the provided tools to run, manage,
-and debug BSD/Illumos virtual machines via anyvm. Prefer the most targeted
-tool for each task (e.g. use exec_in_vm to run a single diagnostic command
-rather than opening a full interactive session).
+You are connected to the anyvm MCP server. anyvm boots prebuilt guest OS
+images under QEMU: BSDs (FreeBSD, OpenBSD, NetBSD, DragonFly BSD, GhostBSD,
+MidnightBSD), illumos/Solaris (OmniOS, OpenIndiana, Tribblix, Solaris),
+Linux (Ubuntu, openEuler), Haiku, BlissOS (Android), Debian GNU/Hurd, and
+Plan 9 (9front) -- across x86_64, aarch64, riscv64, sparc64, powerpc64,
+s390x and more, depending on the OS.
 
-Supported guest operating systems include FreeBSD, OpenBSD, NetBSD, OmniOS,
-SmartOS, and other BSD/Illumos distributions supported by your anyvm setup.
+Workflow:
+1. list_supported_os to see what can be booted.
+2. start_vm to boot a guest in the background (first boot downloads the
+   image, which can take several minutes).
+3. exec_in_vm to run commands over SSH; console_output to read the serial
+   console when SSH is not (yet) available.
+4. stop_vm when done.
 
-When something goes wrong, use console_output and exec_in_vm to gather
-diagnostic information before suggesting fixes.
+A VM is identified by its OS name plus optional release (e.g. os='freebsd',
+release='14.3') -- there are no user-invented VM names. Use list_running_vms
+to see what is currently registered. Note: plan9 has no SSH; use the serial
+console for it.
 """
 
 
-def create_server(anyvm_path: str | None = None) -> FastMCP:
+def create_server(
+    anyvm_path: str | None = None,
+    data_dir: str | None = None,
+) -> FastMCP:
     """Build and return the FastMCP server instance.
 
     Args:
-        anyvm_path: Optional explicit path to the ``anyvm`` binary.  When
-            *None* the binary is looked up on ``PATH``.
+        anyvm_path: Optional explicit path to the ``anyvm`` launcher
+            (binary or anyvm.py). When *None* the bundled anyvm.py is used,
+            falling back to ``anyvm`` on ``PATH``.
+        data_dir: Directory for images, logs, and the VM registry
+            (default: ``~/.anyvm-mcp``).
     """
     mcp: FastMCP = FastMCP(
         name="anyvm-mcp",
         instructions=_INSTRUCTIONS,
     )
-    mgr = VmManager(anyvm_path=anyvm_path)
+    mgr = VmManager(anyvm_path=anyvm_path, data_dir=data_dir)
 
     # ------------------------------------------------------------------
-    # Helper
-    # ------------------------------------------------------------------
-
-    def _ok(message: str) -> str:
-        return message if message else "OK"
-
-    def _vm_err(exc: AnyvmError) -> str:
-        return f"Error: {exc}"
-
-    # ------------------------------------------------------------------
-    # Tool: list_vms
+    # Tool: list_supported_os
     # ------------------------------------------------------------------
 
     @mcp.tool(
         description=(
-            "List all BSD/Illumos virtual machines managed by anyvm, "
-            "including their state (running, stopped, …), OS, CPU, memory, and IP."
+            "List every guest OS anyvm can boot (BSDs, illumos, Linux, Haiku, "
+            "Android/BlissOS, GNU Hurd, Plan 9), with notes and the SSH user."
         )
     )
-    def list_vms() -> list[dict]:
-        """List all VMs managed by anyvm."""
+    def list_supported_os() -> list[dict]:
+        """List supported guest operating systems."""
+        return mgr.list_supported_os()
+
+    # ------------------------------------------------------------------
+    # Tool: start_vm
+    # ------------------------------------------------------------------
+
+    @mcp.tool(
+        description=(
+            "Boot a guest VM in the background. The first boot of an "
+            "OS/release downloads the image (hundreds of MB -- allow several "
+            "minutes). Returns SSH connection details on success. "
+            "OS and release are separate: os='freebsd' release='14.3', "
+            "not 'freebsd-14.3'. Omit release to get the default release."
+        )
+    )
+    def start_vm(
+        os: Annotated[str, "Guest OS name, e.g. 'freebsd', 'openbsd', 'ubuntu'"],
+        release: Annotated[str, "OS release, e.g. '14.3' (default: builder default)"] = "",
+        arch: Annotated[
+            str, "CPU arch: x86_64, aarch64, riscv64, ... (default: host arch)"
+        ] = "",
+        mem_mb: Annotated[int, "RAM in MB (0 = anyvm default)"] = 0,
+        cpus: Annotated[int, "vCPU count (0 = anyvm default)"] = 0,
+        ports: Annotated[
+            list[str], "Port forwards, each 'host:guest' or 'udp:host:guest'"
+        ] = [],
+        volumes: Annotated[
+            list[str], "Folder syncs, each '/host/path:/guest/path'"
+        ] = [],
+        sync: Annotated[
+            str,
+            "Sync mode for volumes: rsync, sshfs, nfs, sys-nfs, scp, 9p "
+            "(default: anyvm's per-OS default)",
+        ] = "",
+        snapshot_mode: Annotated[
+            bool, "QEMU snapshot mode: all guest changes are discarded"
+        ] = False,
+        boot_timeout_sec: Annotated[
+            int, "Seconds to allow for download + boot (default 1800)"
+        ] = 1800,
+    ) -> dict:
+        """Boot a guest VM detached and register it."""
+        try:
+            info = mgr.start_vm(
+                os,
+                release=release,
+                arch=arch,
+                mem_mb=mem_mb,
+                cpus=cpus,
+                ports=list(ports) if ports else None,
+                volumes=list(volumes) if volumes else None,
+                sync=sync,
+                snapshot_mode=snapshot_mode,
+                boot_timeout_sec=boot_timeout_sec,
+            )
+            return info.to_dict()
+        except AnyvmError as exc:
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Tool: list_running_vms
+    # ------------------------------------------------------------------
+
+    @mcp.tool(
+        description=(
+            "List all VMs this server has booted, with a live running/stopped "
+            "state probe, SSH ports, and log locations."
+        )
+    )
+    def list_running_vms() -> list[dict]:
+        """List registered VMs and their live state."""
         try:
             return [v.to_dict() for v in mgr.list_vms()]
         except AnyvmError as exc:
@@ -107,104 +183,19 @@ def create_server(anyvm_path: str | None = None) -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Get detailed information (state, OS, CPUs, memory, IP, disk, …) "
-            "about a single VM."
+            "Detailed info about one VM (state, SSH port/user/key, serial log "
+            "path). Identify the VM by OS name and optional release."
         )
     )
     def vm_info(
-        name: Annotated[str, "Name of the VM to inspect"],
+        os: Annotated[str, "Guest OS name, e.g. 'freebsd'"],
+        release: Annotated[str, "OS release (needed only if several releases run)"] = "",
     ) -> dict:
         """Return detailed information about a VM."""
         try:
-            return mgr.vm_info(name).to_dict()
+            return mgr.vm_info(os, release).to_dict()
         except AnyvmError as exc:
             return {"error": str(exc)}
-
-    # ------------------------------------------------------------------
-    # Tool: create_vm
-    # ------------------------------------------------------------------
-
-    @mcp.tool(
-        description=(
-            "Create a new BSD/Illumos virtual machine. "
-            "Supported OS values include: freebsd-14, freebsd-13, openbsd-7, "
-            "netbsd-10, omnios-r151050, smartos. "
-            "Returns the new VM's details on success."
-        )
-    )
-    def create_vm(
-        name: Annotated[str, "Unique name for the new VM (alphanumeric and hyphens)"],
-        os: Annotated[
-            str,
-            "OS image identifier, e.g. 'freebsd-14', 'openbsd-7', 'omnios-r151050'",
-        ],
-        cpus: Annotated[int, "Number of virtual CPUs (default: 1)"] = 1,
-        memory_mb: Annotated[int, "RAM in megabytes (default: 512)"] = 512,
-        disk_gb: Annotated[int, "Root disk size in gigabytes (default: 20)"] = 20,
-    ) -> dict:
-        """Create a new BSD/Illumos VM."""
-        try:
-            info = mgr.create_vm(
-                name, os, cpus=cpus, memory_mb=memory_mb, disk_gb=disk_gb
-            )
-            return info.to_dict()
-        except AnyvmError as exc:
-            return {"error": str(exc)}
-
-    # ------------------------------------------------------------------
-    # Tool: start_vm
-    # ------------------------------------------------------------------
-
-    @mcp.tool(description="Start a stopped BSD/Illumos VM.")
-    def start_vm(
-        name: Annotated[str, "Name of the VM to start"],
-    ) -> str:
-        """Start a VM."""
-        try:
-            return _ok(mgr.start_vm(name))
-        except AnyvmError as exc:
-            return _vm_err(exc)
-
-    # ------------------------------------------------------------------
-    # Tool: stop_vm
-    # ------------------------------------------------------------------
-
-    @mcp.tool(
-        description=(
-            "Stop a running BSD/Illumos VM. "
-            "Set force=true to hard-stop without a graceful shutdown."
-        )
-    )
-    def stop_vm(
-        name: Annotated[str, "Name of the VM to stop"],
-        force: Annotated[
-            bool, "Hard-stop without graceful shutdown (default: false)"
-        ] = False,
-    ) -> str:
-        """Stop a VM."""
-        try:
-            return _ok(mgr.stop_vm(name, force=force))
-        except AnyvmError as exc:
-            return _vm_err(exc)
-
-    # ------------------------------------------------------------------
-    # Tool: destroy_vm
-    # ------------------------------------------------------------------
-
-    @mcp.tool(
-        description=(
-            "Permanently destroy a VM and release all its resources (disk, network, …). "
-            "This action is irreversible. The VM must be stopped first."
-        )
-    )
-    def destroy_vm(
-        name: Annotated[str, "Name of the VM to destroy"],
-    ) -> str:
-        """Destroy a VM permanently."""
-        try:
-            return _ok(mgr.destroy_vm(name))
-        except AnyvmError as exc:
-            return _vm_err(exc)
 
     # ------------------------------------------------------------------
     # Tool: exec_in_vm
@@ -212,19 +203,44 @@ def create_server(anyvm_path: str | None = None) -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Execute a shell command inside a running BSD/Illumos VM and return "
-            "the combined stdout/stderr output. Useful for diagnostics and automation."
+            "Execute a shell command over SSH inside a running VM and return "
+            "the combined stdout/stderr. Not available for plan9 (no SSH)."
         )
     )
     def exec_in_vm(
-        name: Annotated[str, "Name of the VM"],
+        os: Annotated[str, "Guest OS name, e.g. 'freebsd'"],
         command: Annotated[str, "Shell command to run inside the VM"],
+        release: Annotated[str, "OS release (needed only if several releases run)"] = "",
+        timeout_sec: Annotated[int, "Command timeout in seconds (default 120)"] = 120,
     ) -> str:
         """Run a command inside a VM."""
         try:
-            return mgr.exec_in_vm(name, command)
+            return mgr.exec_in_vm(
+                os, command, release=release, timeout_sec=timeout_sec
+            )
         except AnyvmError as exc:
-            return _vm_err(exc)
+            return "Error: {}".format(exc)
+
+    # ------------------------------------------------------------------
+    # Tool: stop_vm
+    # ------------------------------------------------------------------
+
+    @mcp.tool(
+        description=(
+            "Stop a running VM: graceful guest shutdown over SSH with an ACPI "
+            "fallback; force=true hard-kills QEMU via its monitor."
+        )
+    )
+    def stop_vm(
+        os: Annotated[str, "Guest OS name, e.g. 'freebsd'"],
+        release: Annotated[str, "OS release (needed only if several releases run)"] = "",
+        force: Annotated[bool, "Hard-stop via QEMU monitor (default: false)"] = False,
+    ) -> str:
+        """Stop a VM."""
+        try:
+            return mgr.stop_vm(os, release=release, force=force)
+        except AnyvmError as exc:
+            return "Error: {}".format(exc)
 
     # ------------------------------------------------------------------
     # Tool: console_output
@@ -232,115 +248,21 @@ def create_server(anyvm_path: str | None = None) -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Retrieve the latest console (serial) output from a BSD/Illumos VM. "
-            "Useful for debugging boot failures or checking system logs."
+            "Tail the VM's serial console log. Works even when SSH is down -- "
+            "the tool for debugging boot failures, and the only way to see "
+            "plan9 output."
         )
     )
     def console_output(
-        name: Annotated[str, "Name of the VM"],
-        lines: Annotated[
-            int, "Number of log lines to retrieve (default: 100)"
-        ] = 100,
+        os: Annotated[str, "Guest OS name, e.g. 'freebsd'"],
+        release: Annotated[str, "OS release (needed only if several releases run)"] = "",
+        lines: Annotated[int, "Number of log lines to return (default 100)"] = 100,
     ) -> str:
-        """Get VM console/serial output."""
+        """Get VM serial console output."""
         try:
-            return mgr.console_output(name, lines=lines)
+            return mgr.console_output(os, release=release, lines=lines)
         except AnyvmError as exc:
-            return _vm_err(exc)
-
-    # ------------------------------------------------------------------
-    # Tool: list_snapshots
-    # ------------------------------------------------------------------
-
-    @mcp.tool(
-        description="List all snapshots for a BSD/Illumos VM."
-    )
-    def list_snapshots(
-        name: Annotated[str, "Name of the VM"],
-    ) -> list[dict]:
-        """List snapshots for a VM."""
-        try:
-            return [s.to_dict() for s in mgr.list_snapshots(name)]
-        except AnyvmError as exc:
-            return [{"error": str(exc)}]
-
-    # ------------------------------------------------------------------
-    # Tool: create_snapshot
-    # ------------------------------------------------------------------
-
-    @mcp.tool(
-        description=(
-            "Create a snapshot of a BSD/Illumos VM at its current state. "
-            "The VM can be running or stopped."
-        )
-    )
-    def create_snapshot(
-        name: Annotated[str, "Name of the VM to snapshot"],
-        snapshot_name: Annotated[str, "Name for the new snapshot"],
-        description: Annotated[
-            str, "Optional human-readable description of the snapshot"
-        ] = "",
-    ) -> dict:
-        """Create a VM snapshot."""
-        try:
-            snap = mgr.create_snapshot(name, snapshot_name, description=description)
-            return snap.to_dict()
-        except AnyvmError as exc:
-            return {"error": str(exc)}
-
-    # ------------------------------------------------------------------
-    # Tool: restore_snapshot
-    # ------------------------------------------------------------------
-
-    @mcp.tool(
-        description=(
-            "Restore a BSD/Illumos VM to a previously created snapshot. "
-            "The VM will be reverted to the exact state at snapshot time."
-        )
-    )
-    def restore_snapshot(
-        name: Annotated[str, "Name of the VM"],
-        snapshot_name: Annotated[str, "Name of the snapshot to restore"],
-    ) -> str:
-        """Restore a VM snapshot."""
-        try:
-            return _ok(mgr.restore_snapshot(name, snapshot_name))
-        except AnyvmError as exc:
-            return _vm_err(exc)
-
-    # ------------------------------------------------------------------
-    # Tool: delete_snapshot
-    # ------------------------------------------------------------------
-
-    @mcp.tool(description="Delete a VM snapshot.")
-    def delete_snapshot(
-        name: Annotated[str, "Name of the VM"],
-        snapshot_name: Annotated[str, "Name of the snapshot to delete"],
-    ) -> str:
-        """Delete a VM snapshot."""
-        try:
-            return _ok(mgr.delete_snapshot(name, snapshot_name))
-        except AnyvmError as exc:
-            return _vm_err(exc)
-
-    # ------------------------------------------------------------------
-    # Tool: network_info
-    # ------------------------------------------------------------------
-
-    @mcp.tool(
-        description=(
-            "Return network configuration for a BSD/Illumos VM: "
-            "IP addresses, MAC addresses, virtual NIC names, and VLAN info."
-        )
-    )
-    def network_info(
-        name: Annotated[str, "Name of the VM"],
-    ) -> dict:
-        """Get VM network configuration."""
-        try:
-            return mgr.network_info(name)
-        except AnyvmError as exc:
-            return {"error": str(exc)}
+            return "Error: {}".format(exc)
 
     return mcp
 
@@ -354,13 +276,22 @@ def main() -> None:
     """Entry point for the ``anyvm-mcp`` command."""
     parser = argparse.ArgumentParser(
         prog="anyvm-mcp",
-        description="MCP server that lets AI assistants manage BSD/Illumos VMs via anyvm.",
+        description=(
+            "MCP server that lets AI assistants boot and manage guest VMs "
+            "(BSD, illumos, Linux, Haiku, Android, Hurd, Plan 9) via anyvm."
+        ),
     )
     parser.add_argument(
         "--anyvm",
         metavar="PATH",
         default=None,
-        help="Path to the anyvm binary (default: looked up on PATH).",
+        help="Path to the anyvm launcher (default: bundled anyvm.py).",
+    )
+    parser.add_argument(
+        "--data-dir",
+        metavar="DIR",
+        default=None,
+        help="Directory for images, logs, and VM state (default: ~/.anyvm-mcp).",
     )
     parser.add_argument(
         "--transport",
@@ -381,7 +312,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    server = create_server(anyvm_path=args.anyvm)
+    server = create_server(anyvm_path=args.anyvm, data_dir=args.data_dir)
 
     if args.transport == "stdio":
         server.run(transport="stdio")
@@ -390,7 +321,7 @@ def main() -> None:
     elif args.transport == "streamable-http":
         server.run(transport="streamable-http", host=args.host, port=args.port)
     else:
-        print(f"Unknown transport: {args.transport}", file=sys.stderr)
+        print("Unknown transport: {}".format(args.transport), file=sys.stderr)
         sys.exit(1)
 
 

@@ -4,16 +4,16 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.hooks.custom]
 path = "build_hook.py"
-anyvm-version = "v0.3.2"
+anyvm-version = "v0.5.2"
 
 [project]
 name = "anyvm-mcp"
-version = "0.0.2"
-description = "MCP server for anyvm — run, manage, and debug BSD/Illumos VMs with natural language"
+version = "0.1.0"
+description = "MCP server for anyvm -- boot and manage BSD, illumos, Linux, Haiku, Android, Hurd, and Plan 9 VMs with natural language"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-keywords = ["anyvm", "mcp", "ai", "bsd", "illumos", "vm", "virtualization"]
+keywords = ["anyvm", "mcp", "ai", "bsd", "illumos", "linux", "haiku", "qemu", "vm", "virtualization"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

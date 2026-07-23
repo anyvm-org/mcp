@@ -1,4 +1,5 @@
-"""Tests for VmManager — uses unittest.mock to stub the anyvm CLI."""
+"""Tests for VmManager -- anyvm launcher invocation is mocked, the registry
+and artifact discovery run against a real temp data dir."""
 
 from __future__ import annotations
 
@@ -10,330 +11,415 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from anyvm_mcp.vm_manager import AnyvmError, SnapshotInfo, VmInfo, VmManager, _vendored_anyvm
+from anyvm_mcp.vm_manager import (
+    KNOWN_ARCHES,
+    SHUTDOWN_CMDS,
+    SUPPORTED_OS,
+    SYNC_MODES,
+    AnyvmError,
+    VmInfo,
+    VmManager,
+    _vendored_anyvm,
+)
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures / helpers
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
-def mgr() -> VmManager:
-    """Return a VmManager pointing at a fake 'anyvm' path."""
-    return VmManager(anyvm_path="/usr/local/bin/anyvm")
+def mgr(tmp_path) -> VmManager:
+    """VmManager with a fake anyvm.py path and a temp data dir."""
+    return VmManager(anyvm_path="/opt/anyvm/anyvm.py", data_dir=str(tmp_path))
+
+
+def _fake_artifacts(tmp_path, vm_name="freebsd-14.3", builder="v2.2.5"):
+    """Create the on-disk artifacts anyvm leaves after a detached boot."""
+    os_name = vm_name.split("-")[0]
+    out_dir = tmp_path / os_name / builder
+    out_dir.mkdir(parents=True, exist_ok=True)
+    serial = out_dir / "{}.serial.log".format(vm_name)
+    serial.write_text("login: \n")
+    key = out_dir / "{}-host.id_rsa".format(vm_name)
+    key.write_text("fake-key")
+    return serial, key
+
+
+def _completed(rc=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess(args=[], returncode=rc, stdout=stdout, stderr=stderr)
+
+
+def _registry_entry(tmp_path, vm_name="freebsd-14.3", ssh_port=10022, mon_port=10023):
+    serial, key = _fake_artifacts(tmp_path, vm_name)
+    os_name = vm_name.split("-")[0]
+    return vm_name, {
+        "os": os_name,
+        "release": vm_name[len(os_name) + 1:],
+        "arch": "",
+        "ssh_port": ssh_port,
+        "mon_port": mon_port,
+        "user": "user" if os_name == "haiku" else "root",
+        "key_file": str(key),
+        "serial_log": str(serial),
+        "started_at": 0,
+    }
+
+
+def _seed_registry(mgr_obj, tmp_path, vm_name="freebsd-14.3", **kw):
+    name, entry = _registry_entry(tmp_path, vm_name, **kw)
+    mgr_obj._save_registry({name: entry})
+    return name, entry
 
 
 # ---------------------------------------------------------------------------
-# VmInfo / SnapshotInfo dataclass tests
+# Static tables
 # ---------------------------------------------------------------------------
 
 
-class TestVmInfo:
-    def test_from_dict_minimal(self):
-        info = VmInfo.from_dict({"name": "my-vm", "state": "running"})
-        assert info.name == "my-vm"
-        assert info.state == "running"
-        assert info.cpus == 1
-        assert info.memory_mb == 512
-        assert info.ip == ""
-
-    def test_from_dict_full(self):
-        data = {
-            "name": "bsd-box",
-            "state": "stopped",
-            "os": "freebsd-14",
-            "cpus": 4,
-            "memory": 2048,
-            "ip": "192.168.1.10",
-            "disk": "20G",
+class TestStaticTables:
+    def test_supported_os_matches_anyvm(self):
+        expected = {
+            "freebsd", "openbsd", "netbsd", "dragonflybsd", "ghostbsd",
+            "midnightbsd", "solaris", "omnios", "openindiana", "tribblix",
+            "haiku", "ubuntu", "openeuler", "blissos", "hurd", "plan9",
         }
-        info = VmInfo.from_dict(data)
-        assert info.name == "bsd-box"
-        assert info.os == "freebsd-14"
-        assert info.cpus == 4
-        assert info.memory_mb == 2048
-        assert info.ip == "192.168.1.10"
-        assert info.extra["disk"] == "20G"
+        assert set(SUPPORTED_OS) == expected
 
-    def test_to_dict_round_trip(self):
-        info = VmInfo(name="vm1", state="running", os="openbsd-7", cpus=2, memory_mb=1024)
-        d = info.to_dict()
-        assert d["name"] == "vm1"
-        assert d["state"] == "running"
-        assert d["os"] == "openbsd-7"
-        assert d["cpus"] == 2
-        assert d["memory_mb"] == 1024
+    def test_sync_modes(self):
+        assert set(SYNC_MODES) == {
+            "rsync", "sshfs", "nfs", "sys-nfs", "scp", "9p", "no", "off"
+        }
 
+    def test_shutdown_cmds_cover_ssh_os(self):
+        # Every OS except plan9 (no SSH) has a shutdown command.
+        assert set(SHUTDOWN_CMDS) == set(SUPPORTED_OS) - {"plan9"}
 
-class TestSnapshotInfo:
-    def test_from_dict(self):
-        snap = SnapshotInfo.from_dict(
-            "vm1", {"name": "snap1", "created": "2024-01-01", "description": "test"}
-        )
-        assert snap.name == "snap1"
-        assert snap.vm_name == "vm1"
-        assert snap.created == "2024-01-01"
-        assert snap.description == "test"
-
-    def test_to_dict(self):
-        snap = SnapshotInfo(name="s1", vm_name="vm1", created="2024-01-01")
-        d = snap.to_dict()
-        assert d["name"] == "s1"
-        assert d["vm_name"] == "vm1"
+    def test_list_supported_os(self, mgr):
+        rows = mgr.list_supported_os()
+        assert len(rows) == len(SUPPORTED_OS)
+        by_os = {r["os"]: r for r in rows}
+        assert by_os["haiku"]["ssh_user"] == "user"
+        assert by_os["freebsd"]["ssh_user"] == "root"
 
 
 # ---------------------------------------------------------------------------
-# VmManager._run tests
+# start_vm
 # ---------------------------------------------------------------------------
 
 
-def _make_completed(stdout: str = "", returncode: int = 0, stderr: str = "") -> MagicMock:
-    result = MagicMock()
-    result.stdout = stdout
-    result.stderr = stderr
-    result.returncode = returncode
-    return result
+class TestStartVm:
+    def test_rejects_unsupported_os(self, mgr):
+        with pytest.raises(AnyvmError, match="Unsupported OS"):
+            mgr.start_vm("smartos")
 
+    def test_rejects_bad_arch(self, mgr):
+        with pytest.raises(AnyvmError, match="Unknown arch"):
+            mgr.start_vm("freebsd", arch="mips")
 
-class TestVmManagerRun:
-    def test_run_success(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("hello")) as mock_run:
-            output = mgr._run("list")
-        mock_run.assert_called_once()
-        assert output == "hello"
+    def test_rejects_bad_sync(self, mgr):
+        with pytest.raises(AnyvmError, match="Invalid sync mode"):
+            mgr.start_vm("freebsd", sync="ftp", volumes=["/a:/b"])
 
-    def test_run_failure_raises_anyvm_error(self, mgr: VmManager):
+    def test_rejects_sync_without_volumes(self, mgr):
+        with pytest.raises(AnyvmError, match="requires at least one volume"):
+            mgr.start_vm("freebsd", sync="rsync")
+
+    def test_builds_launcher_command(self, mgr, tmp_path):
+        _fake_artifacts(tmp_path, "freebsd-14.3")
+        with patch("anyvm_mcp.vm_manager.subprocess.run", return_value=_completed()) as run:
+            with patch.object(VmManager, "_free_port", side_effect=[10022, 10023]):
+                with patch.object(VmManager, "_port_open", return_value=True):
+                    info = mgr.start_vm(
+                        "freebsd",
+                        release="14.3",
+                        arch="x86_64",
+                        mem_mb=2048,
+                        cpus=2,
+                        ports=["8080:80"],
+                        volumes=["/tmp/x:/x"],
+                        sync="rsync",
+                    )
+
+        cmd = run.call_args[0][0]
+        assert cmd[0] == sys.executable
+        assert cmd[1] == "/opt/anyvm/anyvm.py"
+        joined = " ".join(cmd)
+        assert "--os freebsd" in joined
+        assert "--release 14.3" in joined
+        assert "--arch x86_64" in joined
+        assert "--mem 2048" in joined
+        assert "--cpu 2" in joined
+        assert "--ssh-port 10022" in joined
+        assert "--mon 10023" in joined
+        assert "--detach" in joined
+        assert "--remote-vnc no" in joined
+        assert "-p 8080:80" in joined
+        assert "-v /tmp/x:/x" in joined
+        assert "--sync rsync" in joined
+        # No fictional subcommands.
+        assert "create" not in cmd
+        assert "--format" not in cmd
+
+        assert info.name == "freebsd-14.3"
+        assert info.release == "14.3"
+        assert info.state == "running"
+        assert info.ssh_port == 10022
+        assert info.user == "root"
+
+    def test_registers_vm(self, mgr, tmp_path):
+        _fake_artifacts(tmp_path, "openbsd-7.9")
+        with patch("anyvm_mcp.vm_manager.subprocess.run", return_value=_completed()):
+            with patch.object(VmManager, "_free_port", side_effect=[11022, 11023]):
+                with patch.object(VmManager, "_port_open", return_value=True):
+                    mgr.start_vm("openbsd", release="7.9")
+
+        reg = json.loads((tmp_path / "mcp-registry.json").read_text())
+        assert "openbsd-7.9" in reg
+        assert reg["openbsd-7.9"]["ssh_port"] == 11022
+        assert reg["openbsd-7.9"]["mon_port"] == 11023
+
+    def test_discovers_release_when_omitted(self, mgr, tmp_path):
+        # anyvm auto-picks the release; the serial log name reveals it.
+        _fake_artifacts(tmp_path, "netbsd-10.1")
+        with patch("anyvm_mcp.vm_manager.subprocess.run", return_value=_completed()):
+            with patch.object(VmManager, "_free_port", side_effect=[12022, 12023]):
+                with patch.object(VmManager, "_port_open", return_value=True):
+                    info = mgr.start_vm("netbsd")
+        assert info.name == "netbsd-10.1"
+        assert info.release == "10.1"
+
+    def test_boot_failure_raises_with_output_tail(self, mgr, tmp_path):
         with patch(
-            "subprocess.run",
-            return_value=_make_completed("", returncode=1, stderr="VM not found"),
+            "anyvm_mcp.vm_manager.subprocess.run",
+            return_value=_completed(rc=1, stderr="Error: boot timeout"),
         ):
-            with pytest.raises(AnyvmError, match="VM not found"):
-                mgr._run("start", "missing-vm")
+            with pytest.raises(AnyvmError, match="boot timeout"):
+                mgr.start_vm("freebsd", release="14.3")
 
-    def test_run_binary_not_found(self, mgr: VmManager):
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            with pytest.raises(AnyvmError, match="anyvm CLI not found"):
-                mgr._run("list")
-
-    def test_run_json_valid(self, mgr: VmManager):
-        payload = json.dumps([{"name": "vm1", "state": "running"}])
-        with patch("subprocess.run", return_value=_make_completed(payload)):
-            result = mgr._run_json("list")
-        assert result[0]["name"] == "vm1"
-
-    def test_run_json_invalid(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("not-json")):
-            with pytest.raises(AnyvmError, match="non-JSON"):
-                mgr._run_json("list")
-
-
-# ---------------------------------------------------------------------------
-# VmManager high-level method tests
-# ---------------------------------------------------------------------------
-
-
-class TestListVms:
-    def test_returns_vm_infos(self, mgr: VmManager):
-        payload = json.dumps([
-            {"name": "vm1", "state": "running", "os": "freebsd-14"},
-            {"name": "vm2", "state": "stopped", "os": "openbsd-7"},
-        ])
-        with patch("subprocess.run", return_value=_make_completed(payload)):
-            vms = mgr.list_vms()
-        assert len(vms) == 2
-        assert vms[0].name == "vm1"
-        assert vms[1].state == "stopped"
-
-    def test_handles_wrapped_list(self, mgr: VmManager):
-        payload = json.dumps({"vms": [{"name": "vm3", "state": "running"}]})
-        with patch("subprocess.run", return_value=_make_completed(payload)):
-            vms = mgr.list_vms()
-        assert vms[0].name == "vm3"
-
-
-class TestCreateVm:
-    def test_create_calls_cli_then_info(self, mgr: VmManager):
-        info_payload = json.dumps(
-            {"name": "new-vm", "state": "stopped", "os": "freebsd-14"}
-        )
-        # create → empty stdout; info → JSON
-        responses = [
-            _make_completed(""),
-            _make_completed(info_payload),
-        ]
-        with patch("subprocess.run", side_effect=responses):
-            info = mgr.create_vm("new-vm", "freebsd-14", cpus=2, memory_mb=1024, disk_gb=40)
-        assert info.name == "new-vm"
-        assert info.os == "freebsd-14"
-
-    def test_create_propagates_error(self, mgr: VmManager):
+    def test_launcher_missing(self, mgr):
         with patch(
-            "subprocess.run",
-            return_value=_make_completed("", returncode=1, stderr="name already in use"),
+            "anyvm_mcp.vm_manager.subprocess.run", side_effect=FileNotFoundError()
         ):
-            with pytest.raises(AnyvmError, match="name already in use"):
-                mgr.create_vm("existing", "freebsd-14")
+            with pytest.raises(AnyvmError, match="not found"):
+                mgr.start_vm("freebsd", release="14.3")
+
+    def test_haiku_user(self, mgr, tmp_path):
+        _fake_artifacts(tmp_path, "haiku-r1beta5")
+        with patch("anyvm_mcp.vm_manager.subprocess.run", return_value=_completed()):
+            with patch.object(VmManager, "_free_port", side_effect=[13022, 13023]):
+                with patch.object(VmManager, "_port_open", return_value=True):
+                    info = mgr.start_vm("haiku")
+        assert info.user == "user"
 
 
-class TestStartStopDestroy:
-    def test_start_vm(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("VM started")):
-            result = mgr.start_vm("my-vm")
-        assert "started" in result.lower()
+# ---------------------------------------------------------------------------
+# list / info
+# ---------------------------------------------------------------------------
 
-    def test_stop_vm(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("VM stopped")):
-            result = mgr.stop_vm("my-vm")
-        assert "stopped" in result.lower()
 
-    def test_stop_vm_force(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("VM stopped")) as mock_run:
-            mgr.stop_vm("my-vm", force=True)
-        call_args = mock_run.call_args[0][0]
-        assert "--force" in call_args
+class TestListAndInfo:
+    def test_list_empty(self, mgr):
+        assert mgr.list_vms() == []
 
-    def test_destroy_vm_passes_yes(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("destroyed")) as mock_run:
-            mgr.destroy_vm("old-vm")
-        call_args = mock_run.call_args[0][0]
-        assert "--yes" in call_args
+    def test_list_probes_state(self, mgr, tmp_path):
+        _seed_registry(mgr, tmp_path)
+        with patch.object(VmManager, "_port_open", return_value=False):
+            vms = mgr.list_vms()
+        assert len(vms) == 1
+        assert vms[0].state == "stopped"
+
+    def test_info_by_os_only(self, mgr, tmp_path):
+        _seed_registry(mgr, tmp_path)
+        with patch.object(VmManager, "_port_open", return_value=True):
+            info = mgr.vm_info("freebsd")
+        assert info.name == "freebsd-14.3"
+        assert info.state == "running"
+        assert "ssh_command" in info.to_dict()
+
+    def test_info_ambiguous_needs_release(self, mgr, tmp_path):
+        n1, e1 = _registry_entry(tmp_path, "freebsd-14.3")
+        n2, e2 = _registry_entry(tmp_path, "freebsd-13.5", ssh_port=10122, mon_port=10123)
+        mgr._save_registry({n1: e1, n2: e2})
+        with pytest.raises(AnyvmError, match="explicit release"):
+            mgr.vm_info("freebsd")
+        with patch.object(VmManager, "_port_open", return_value=True):
+            info = mgr.vm_info("freebsd", "13.5")
+        assert info.name == "freebsd-13.5"
+
+    def test_info_unknown_vm(self, mgr):
+        with pytest.raises(AnyvmError, match="start_vm first"):
+            mgr.vm_info("openbsd")
+
+    def test_info_unsupported_os(self, mgr):
+        with pytest.raises(AnyvmError, match="Unsupported OS"):
+            mgr.vm_info("windows")
+
+
+# ---------------------------------------------------------------------------
+# exec_in_vm
+# ---------------------------------------------------------------------------
 
 
 class TestExecInVm:
-    def test_exec_returns_output(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("FreeBSD 14.0")):
-            out = mgr.exec_in_vm("my-vm", "uname -r")
-        assert "FreeBSD" in out
+    def test_builds_ssh_command(self, mgr, tmp_path):
+        name, entry = _seed_registry(mgr, tmp_path)
+        with patch.object(VmManager, "_port_open", return_value=True):
+            with patch(
+                "anyvm_mcp.vm_manager.subprocess.run",
+                return_value=_completed(stdout="FreeBSD 14.3\n"),
+            ) as run:
+                out = mgr.exec_in_vm("freebsd", "uname -sr")
+
+        cmd = run.call_args[0][0]
+        assert cmd[0] == "ssh"
+        joined = " ".join(cmd)
+        assert "-p 10022" in joined
+        assert "root@127.0.0.1" in joined
+        assert "-i {}".format(entry["key_file"]) in joined
+        assert "BatchMode=yes" in joined
+        assert cmd[-1] == "uname -sr"
+        assert out == "FreeBSD 14.3"
+
+    def test_nonzero_exit_appended(self, mgr, tmp_path):
+        _seed_registry(mgr, tmp_path)
+        with patch.object(VmManager, "_port_open", return_value=True):
+            with patch(
+                "anyvm_mcp.vm_manager.subprocess.run",
+                return_value=_completed(rc=127, stderr="sh: nope: not found\n"),
+            ):
+                out = mgr.exec_in_vm("freebsd", "nope")
+        assert "not found" in out
+        assert "[exit code 127]" in out
+
+    def test_requires_running_vm(self, mgr, tmp_path):
+        _seed_registry(mgr, tmp_path)
+        with patch.object(VmManager, "_port_open", return_value=False):
+            with pytest.raises(AnyvmError, match="not running"):
+                mgr.exec_in_vm("freebsd", "uname")
+
+    def test_plan9_rejected(self, mgr, tmp_path):
+        _seed_registry(mgr, tmp_path, "plan9-9front")
+        with pytest.raises(AnyvmError, match="no SSH"):
+            mgr.exec_in_vm("plan9", "ls")
+
+    def test_timeout(self, mgr, tmp_path):
+        _seed_registry(mgr, tmp_path)
+        with patch.object(VmManager, "_port_open", return_value=True):
+            with patch(
+                "anyvm_mcp.vm_manager.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=5),
+            ):
+                with pytest.raises(AnyvmError, match="timed out"):
+                    mgr.exec_in_vm("freebsd", "sleep 999", timeout_sec=5)
+
+
+# ---------------------------------------------------------------------------
+# stop_vm
+# ---------------------------------------------------------------------------
+
+
+class TestStopVm:
+    def test_graceful_ssh_shutdown(self, mgr, tmp_path):
+        _seed_registry(mgr, tmp_path)
+        # Ports open before the shutdown command, closed afterwards.
+        port_alive = {"alive": True}
+
+        def fake_port_open(self, port, timeout=2.0):
+            return port_alive["alive"]
+
+        def fake_run(cmd, **kw):
+            port_alive["alive"] = False
+            return _completed()
+
+        with patch.object(VmManager, "_port_open", fake_port_open):
+            with patch("anyvm_mcp.vm_manager.subprocess.run", side_effect=fake_run) as run:
+                msg = mgr.stop_vm("freebsd")
+
+        assert "shutdown -p now" in run.call_args[0][0]
+        assert "stopped" in msg
+        assert mgr._load_registry() == {}
+
+    def test_force_uses_monitor_quit(self, mgr, tmp_path):
+        _seed_registry(mgr, tmp_path)
+        port_alive = {"alive": True}
+
+        def fake_port_open(self, port, timeout=2.0):
+            return port_alive["alive"]
+
+        def fake_monitor(self, port, command):
+            assert command == "quit"
+            port_alive["alive"] = False
+
+        with patch.object(VmManager, "_port_open", fake_port_open):
+            with patch.object(VmManager, "_monitor_cmd", fake_monitor):
+                msg = mgr.stop_vm("freebsd", force=True)
+        assert "stopped" in msg
+
+    def test_already_stopped_prunes_registry(self, mgr, tmp_path):
+        _seed_registry(mgr, tmp_path)
+        with patch.object(VmManager, "_port_open", return_value=False):
+            msg = mgr.stop_vm("freebsd")
+        assert "already stopped" in msg
+        assert mgr._load_registry() == {}
+
+    def test_plan9_uses_monitor(self, mgr, tmp_path):
+        _seed_registry(mgr, tmp_path, "plan9-9front")
+        port_alive = {"alive": True}
+        sent = []
+
+        def fake_port_open(self, port, timeout=2.0):
+            return port_alive["alive"]
+
+        def fake_monitor(self, port, command):
+            sent.append(command)
+            port_alive["alive"] = False
+
+        with patch.object(VmManager, "_port_open", fake_port_open):
+            with patch.object(VmManager, "_monitor_cmd", fake_monitor):
+                mgr.stop_vm("plan9")
+        assert sent == ["system_powerdown"]
+
+
+# ---------------------------------------------------------------------------
+# console_output
+# ---------------------------------------------------------------------------
 
 
 class TestConsoleOutput:
-    def test_console_returns_lines(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("boot log line")) as mock_run:
-            out = mgr.console_output("my-vm", lines=50)
-        call_args = mock_run.call_args[0][0]
-        assert "--lines" in call_args
-        assert "50" in call_args
-        assert "boot log line" in out
+    def test_tails_serial_log(self, mgr, tmp_path):
+        name, entry = _seed_registry(mgr, tmp_path)
+        with open(entry["serial_log"], "w") as f:
+            f.write("\n".join("line{}".format(i) for i in range(200)))
+        out = mgr.console_output("freebsd", lines=5)
+        assert out.splitlines() == ["line195", "line196", "line197", "line198", "line199"]
 
-
-class TestSnapshots:
-    def test_list_snapshots(self, mgr: VmManager):
-        payload = json.dumps([{"name": "snap1", "created": "2024-01-01"}])
-        with patch("subprocess.run", return_value=_make_completed(payload)):
-            snaps = mgr.list_snapshots("my-vm")
-        assert snaps[0].name == "snap1"
-
-    def test_list_snapshots_wrapped(self, mgr: VmManager):
-        payload = json.dumps({"snapshots": [{"name": "s1", "created": "2024-06-01"}]})
-        with patch("subprocess.run", return_value=_make_completed(payload)):
-            snaps = mgr.list_snapshots("my-vm")
-        assert snaps[0].name == "s1"
-
-    def test_create_snapshot(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("")):
-            snap = mgr.create_snapshot("my-vm", "snap1", description="before upgrade")
-        assert snap.name == "snap1"
-        assert snap.vm_name == "my-vm"
-
-    def test_restore_snapshot(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("restored")):
-            result = mgr.restore_snapshot("my-vm", "snap1")
-        assert "restored" in result
-
-    def test_delete_snapshot(self, mgr: VmManager):
-        with patch("subprocess.run", return_value=_make_completed("deleted")):
-            result = mgr.delete_snapshot("my-vm", "snap1")
-        assert "deleted" in result
-
-
-class TestNetworkInfo:
-    def test_network_info_dict(self, mgr: VmManager):
-        payload = json.dumps({"ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:ff"})
-        with patch("subprocess.run", return_value=_make_completed(payload)):
-            info = mgr.network_info("my-vm")
-        assert info["ip"] == "10.0.0.5"
-
-    def test_network_info_list_wrapped(self, mgr: VmManager):
-        payload = json.dumps([{"interface": "vtnet0", "ip": "10.0.0.5"}])
-        with patch("subprocess.run", return_value=_make_completed(payload)):
-            info = mgr.network_info("my-vm")
-        assert "interfaces" in info
+    def test_missing_log(self, mgr, tmp_path):
+        name, entry = _seed_registry(mgr, tmp_path)
+        os.remove(entry["serial_log"])
+        with pytest.raises(AnyvmError, match="No serial log"):
+            mgr.console_output("freebsd")
 
 
 # ---------------------------------------------------------------------------
-# Vendored anyvm.py tests
+# Launcher resolution
 # ---------------------------------------------------------------------------
 
 
-class TestVendoredAnyvm:
-    def test_vendored_anyvm_returns_path_when_file_exists(self, tmp_path):
-        vendor_dir = tmp_path / "vendor"
-        vendor_dir.mkdir()
-        anyvm_file = vendor_dir / "anyvm.py"
-        anyvm_file.write_text("# fake anyvm")
+class TestLauncherResolution:
+    def test_explicit_py_path_uses_python(self, tmp_path):
+        m = VmManager(anyvm_path="/x/anyvm.py", data_dir=str(tmp_path))
+        assert m._anyvm_cmd() == [sys.executable, "/x/anyvm.py"]
 
-        with patch("anyvm_mcp.vm_manager.os.path.dirname", return_value=str(tmp_path)):
-            result = _vendored_anyvm()
-        assert result is not None
-        assert result.endswith("anyvm.py")
+    def test_explicit_binary_path(self, tmp_path):
+        m = VmManager(anyvm_path="/usr/local/bin/anyvm", data_dir=str(tmp_path))
+        assert m._anyvm_cmd() == ["/usr/local/bin/anyvm"]
 
-    def test_vendored_anyvm_returns_none_when_missing(self, tmp_path):
-        with patch("anyvm_mcp.vm_manager.os.path.dirname", return_value=str(tmp_path)):
-            result = _vendored_anyvm()
-        assert result is None
+    def test_vendored_lookup(self, tmp_path):
+        with patch("anyvm_mcp.vm_manager._vendored_anyvm", return_value="/v/anyvm.py"):
+            m = VmManager(data_dir=str(tmp_path))
+        assert m._anyvm_cmd() == [sys.executable, "/v/anyvm.py"]
 
-
-class TestVmManagerInit:
-    def test_explicit_path_no_python(self):
-        mgr = VmManager(anyvm_path="/custom/anyvm")
-        assert mgr._anyvm == "/custom/anyvm"
-        assert mgr._use_python is False
-
-    def test_vendored_uses_python(self, tmp_path):
-        vendor_dir = tmp_path / "vendor"
-        vendor_dir.mkdir()
-        (vendor_dir / "anyvm.py").write_text("# fake")
-
-        with patch("anyvm_mcp.vm_manager._vendored_anyvm", return_value=str(vendor_dir / "anyvm.py")):
-            mgr = VmManager()
-        assert mgr._anyvm == str(vendor_dir / "anyvm.py")
-        assert mgr._use_python is True
-
-    def test_fallback_to_path(self):
-        with patch("anyvm_mcp.vm_manager._vendored_anyvm", return_value=None):
-            with patch("shutil.which", return_value="/usr/bin/anyvm"):
-                mgr = VmManager()
-        assert mgr._anyvm == "/usr/bin/anyvm"
-        assert mgr._use_python is False
-
-    def test_fallback_to_default(self):
-        with patch("anyvm_mcp.vm_manager._vendored_anyvm", return_value=None):
-            with patch("shutil.which", return_value=None):
-                mgr = VmManager()
-        assert mgr._anyvm == "anyvm"
-        assert mgr._use_python is False
-
-
-class TestRunWithVendored:
-    def test_run_uses_sys_executable_for_vendored(self):
-        with patch("anyvm_mcp.vm_manager._vendored_anyvm", return_value="/pkg/vendor/anyvm.py"):
-            mgr = VmManager()
-
-        with patch("subprocess.run", return_value=_make_completed("ok")) as mock_run:
-            mgr._run("list")
-
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == sys.executable
-        assert cmd[1] == "/pkg/vendor/anyvm.py"
-        assert cmd[2] == "list"
-
-    def test_run_direct_for_explicit_path(self):
-        mgr = VmManager(anyvm_path="/usr/local/bin/anyvm")
-
-        with patch("subprocess.run", return_value=_make_completed("ok")) as mock_run:
-            mgr._run("list")
-
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "/usr/local/bin/anyvm"
-        assert cmd[1] == "list"
+    def test_vendored_helper_returns_none_when_absent(self):
+        # The source tree has no vendor dir (it is created at build time).
+        assert _vendored_anyvm() is None

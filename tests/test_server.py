@@ -1,4 +1,4 @@
-"""Tests for the FastMCP server — verifies tool registration and behaviour.
+"""Tests for the FastMCP server -- verifies tool registration and behaviour.
 
 ``server.call_tool`` returns a 2-tuple ``(content_blocks, structured)``,
 where ``structured["result"]`` holds the actual return value of the tool
@@ -12,16 +12,21 @@ from unittest.mock import patch
 import pytest
 
 from anyvm_mcp.server import create_server
-from anyvm_mcp.vm_manager import AnyvmError, SnapshotInfo, VmInfo
+from anyvm_mcp.vm_manager import AnyvmError, VmInfo, VmManager
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_VM1 = VmInfo(name="vm1", state="running", os="freebsd-14", cpus=2, memory_mb=1024, ip="10.0.0.1")
-_VM2 = VmInfo(name="vm2", state="stopped", os="openbsd-7", cpus=1, memory_mb=512)
-_SNAP1 = SnapshotInfo(name="snap1", vm_name="vm1", created="2024-01-01")
+_VM1 = VmInfo(
+    name="freebsd-14.3", os="freebsd", release="14.3", state="running",
+    ssh_port=10022, mon_port=10023, user="root",
+)
+_VM2 = VmInfo(
+    name="openbsd-7.9", os="openbsd", release="7.9", state="stopped",
+    ssh_port=11022, mon_port=11023, user="root",
+)
 
 
 def _result(call_tool_return):
@@ -41,8 +46,8 @@ def _result(call_tool_return):
 
 
 @pytest.fixture()
-def server():
-    return create_server(anyvm_path="/usr/local/bin/anyvm")
+def server(tmp_path):
+    return create_server(anyvm_path="/opt/anyvm/anyvm.py", data_dir=str(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -54,19 +59,13 @@ class TestToolRegistration:
     """Verify that all expected tools are registered on the server."""
 
     EXPECTED_TOOLS = {
-        "list_vms",
-        "vm_info",
-        "create_vm",
+        "list_supported_os",
         "start_vm",
-        "stop_vm",
-        "destroy_vm",
+        "list_running_vms",
+        "vm_info",
         "exec_in_vm",
+        "stop_vm",
         "console_output",
-        "list_snapshots",
-        "create_snapshot",
-        "restore_snapshot",
-        "delete_snapshot",
-        "network_info",
     }
 
     @pytest.mark.asyncio
@@ -81,149 +80,129 @@ class TestToolRegistration:
 # ---------------------------------------------------------------------------
 
 
-class TestListVmsTool:
+class TestListSupportedOsTool:
+    @pytest.mark.asyncio
+    async def test_lists_all_os(self, server):
+        raw = await server.call_tool("list_supported_os", {})
+        result = _result(raw)
+        names = {r["os"] for r in result}
+        assert "freebsd" in names
+        assert "plan9" in names
+        assert "hurd" in names
+        assert "openeuler" in names
+        assert "smartos" not in names
+
+
+class TestStartVmTool:
+    @pytest.mark.asyncio
+    async def test_starts_vm(self, server):
+        with patch.object(VmManager, "start_vm", return_value=_VM1) as start:
+            raw = await server.call_tool(
+                "start_vm",
+                {"os": "freebsd", "release": "14.3", "mem_mb": 2048, "cpus": 2},
+            )
+        result = _result(raw)
+        assert result["name"] == "freebsd-14.3"
+        assert result["state"] == "running"
+        assert result["ssh_command"] == "ssh -p 10022 root@127.0.0.1"
+        kwargs = start.call_args
+        assert kwargs[0][0] == "freebsd"
+        assert kwargs[1]["release"] == "14.3"
+        assert kwargs[1]["mem_mb"] == 2048
+
+    @pytest.mark.asyncio
+    async def test_error_returned_as_dict(self, server):
+        with patch.object(
+            VmManager, "start_vm", side_effect=AnyvmError("boot failed")
+        ):
+            raw = await server.call_tool("start_vm", {"os": "freebsd"})
+        result = _result(raw)
+        assert "boot failed" in result["error"]
+
+
+class TestListRunningVmsTool:
     @pytest.mark.asyncio
     async def test_returns_list(self, server):
-        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "list_vms", return_value=[_VM1, _VM2]):
-            raw = await server.call_tool("list_vms", {})
-
+            raw = await server.call_tool("list_running_vms", {})
         result = _result(raw)
-        assert isinstance(result, list)
         names = [r["name"] for r in result]
-        assert "vm1" in names
-        assert "vm2" in names
+        assert names == ["freebsd-14.3", "openbsd-7.9"]
 
     @pytest.mark.asyncio
-    async def test_returns_error_on_failure(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "list_vms", side_effect=AnyvmError("CLI missing")):
-            raw = await server.call_tool("list_vms", {})
-
-        result = _result(raw)
-        assert result[0].get("error") is not None
+    async def test_empty(self, server):
+        with patch.object(VmManager, "list_vms", return_value=[]):
+            raw = await server.call_tool("list_running_vms", {})
+        assert _result(raw) == []
 
 
 class TestVmInfoTool:
     @pytest.mark.asyncio
     async def test_returns_info(self, server):
-        from anyvm_mcp.vm_manager import VmManager
         with patch.object(VmManager, "vm_info", return_value=_VM1):
-            raw = await server.call_tool("vm_info", {"name": "vm1"})
-
+            raw = await server.call_tool("vm_info", {"os": "freebsd"})
         result = _result(raw)
-        assert result["name"] == "vm1"
+        assert result["name"] == "freebsd-14.3"
         assert result["state"] == "running"
 
     @pytest.mark.asyncio
     async def test_returns_error_on_failure(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "vm_info", side_effect=AnyvmError("not found")):
-            raw = await server.call_tool("vm_info", {"name": "missing"})
-
+        with patch.object(
+            VmManager, "vm_info", side_effect=AnyvmError("start_vm first")
+        ):
+            raw = await server.call_tool("vm_info", {"os": "openbsd"})
         result = _result(raw)
         assert "error" in result
-
-
-class TestCreateVmTool:
-    @pytest.mark.asyncio
-    async def test_creates_vm(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "create_vm", return_value=_VM1):
-            raw = await server.call_tool(
-                "create_vm",
-                {"name": "vm1", "os": "freebsd-14", "cpus": 2, "memory_mb": 1024, "disk_gb": 20},
-            )
-
-        result = _result(raw)
-        assert result["name"] == "vm1"
-
-    @pytest.mark.asyncio
-    async def test_error_propagated(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "create_vm", side_effect=AnyvmError("name conflict")):
-            raw = await server.call_tool("create_vm", {"name": "dup", "os": "freebsd-14"})
-
-        result = _result(raw)
-        assert "error" in result
-
-
-class TestStartStopDestroyTools:
-    @pytest.mark.asyncio
-    async def test_start_vm(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "start_vm", return_value="VM started"):
-            raw = await server.call_tool("start_vm", {"name": "vm1"})
-        assert "started" in _result(raw).lower()
-
-    @pytest.mark.asyncio
-    async def test_stop_vm(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "stop_vm", return_value="VM stopped"):
-            raw = await server.call_tool("stop_vm", {"name": "vm1"})
-        assert "stopped" in _result(raw).lower()
-
-    @pytest.mark.asyncio
-    async def test_destroy_vm(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "destroy_vm", return_value="destroyed"):
-            raw = await server.call_tool("destroy_vm", {"name": "vm1"})
-        assert "destroyed" in _result(raw).lower()
 
 
 class TestExecInVmTool:
     @pytest.mark.asyncio
     async def test_exec(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "exec_in_vm", return_value="FreeBSD 14.0"):
+        with patch.object(
+            VmManager, "exec_in_vm", return_value="FreeBSD 14.3-RELEASE"
+        ) as ex:
             raw = await server.call_tool(
-                "exec_in_vm", {"name": "vm1", "command": "uname -r"}
+                "exec_in_vm", {"os": "freebsd", "command": "uname -sr"}
             )
         assert "FreeBSD" in _result(raw)
-
-
-class TestSnapshotTools:
-    @pytest.mark.asyncio
-    async def test_list_snapshots(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "list_snapshots", return_value=[_SNAP1]):
-            raw = await server.call_tool("list_snapshots", {"name": "vm1"})
-        assert _result(raw)[0]["name"] == "snap1"
+        assert ex.call_args[0] == ("freebsd", "uname -sr")
 
     @pytest.mark.asyncio
-    async def test_create_snapshot(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "create_snapshot", return_value=_SNAP1):
-            raw = await server.call_tool(
-                "create_snapshot", {"name": "vm1", "snapshot_name": "snap1"}
-            )
-        assert _result(raw)["name"] == "snap1"
-
-    @pytest.mark.asyncio
-    async def test_restore_snapshot(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "restore_snapshot", return_value="restored"):
-            raw = await server.call_tool(
-                "restore_snapshot", {"name": "vm1", "snapshot_name": "snap1"}
-            )
-        assert "restored" in _result(raw).lower()
-
-    @pytest.mark.asyncio
-    async def test_delete_snapshot(self, server):
-        from anyvm_mcp.vm_manager import VmManager
-        with patch.object(VmManager, "delete_snapshot", return_value="deleted"):
-            raw = await server.call_tool(
-                "delete_snapshot", {"name": "vm1", "snapshot_name": "snap1"}
-            )
-        assert "deleted" in _result(raw).lower()
-
-
-class TestNetworkInfoTool:
-    @pytest.mark.asyncio
-    async def test_network_info(self, server):
-        from anyvm_mcp.vm_manager import VmManager
+    async def test_error_returned_as_text(self, server):
         with patch.object(
-            VmManager, "network_info", return_value={"ip": "10.0.0.1", "mac": "aa:bb:cc:00:11:22"}
+            VmManager, "exec_in_vm", side_effect=AnyvmError("not running")
         ):
-            raw = await server.call_tool("network_info", {"name": "vm1"})
-        assert _result(raw)["ip"] == "10.0.0.1"
+            raw = await server.call_tool(
+                "exec_in_vm", {"os": "freebsd", "command": "uname"}
+            )
+        assert "Error: not running" in _result(raw)
+
+
+class TestStopVmTool:
+    @pytest.mark.asyncio
+    async def test_stop(self, server):
+        with patch.object(
+            VmManager, "stop_vm", return_value="VM 'freebsd-14.3' stopped."
+        ) as stop:
+            raw = await server.call_tool("stop_vm", {"os": "freebsd"})
+        assert "stopped" in _result(raw)
+        assert stop.call_args[1]["force"] is False
+
+    @pytest.mark.asyncio
+    async def test_stop_force(self, server):
+        with patch.object(VmManager, "stop_vm", return_value="stopped") as stop:
+            await server.call_tool("stop_vm", {"os": "freebsd", "force": True})
+        assert stop.call_args[1]["force"] is True
+
+
+class TestConsoleOutputTool:
+    @pytest.mark.asyncio
+    async def test_console(self, server):
+        with patch.object(
+            VmManager, "console_output", return_value="login: root"
+        ) as con:
+            raw = await server.call_tool(
+                "console_output", {"os": "freebsd", "lines": 50}
+            )
+        assert "login" in _result(raw)
+        assert con.call_args[1]["lines"] == 50

@@ -13,7 +13,7 @@ class AnyvmDownloadHook(BuildHookInterface):
     PLUGIN_NAME = "anyvm-download"
 
     def initialize(self, version: str, build_data: dict) -> None:  # noqa: ARG002
-        anyvm_version = self.config.get("anyvm-version", "v0.3.2")
+        anyvm_version = self.config.get("anyvm-version", "v0.5.2")
         url = f"https://github.com/anyvm-org/anyvm/raw/{anyvm_version}/anyvm.py"
 
         vendor_dir = os.path.join(

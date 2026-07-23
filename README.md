@@ -1,21 +1,27 @@
 # anyvm-mcp
 
-> MCP server for **anyvm** — run, manage, and debug BSD/Illumos VMs with natural language.  
+> MCP server for **anyvm** -- boot and manage BSD, illumos, Linux, Haiku, Android, GNU Hurd, and Plan 9 VMs with natural language.
 > Works with **Claude Code**, **GitHub Copilot**, and any other [MCP](https://modelcontextprotocol.io)-compatible AI assistant.
 
 ---
 
 ## Overview
 
-**anyvm-mcp** is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that bridges AI coding assistants with the [anyvm](https://anyvm.org) VM manager.  
-Once installed, your AI assistant can:
+**anyvm-mcp** is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that bridges AI coding assistants with the [anyvm](https://anyvm.org) VM launcher.
+anyvm boots prebuilt guest images under QEMU -- no manual installation, no libvirt. Once installed, your AI assistant can:
 
-- 🖥️ **Create** FreeBSD, OpenBSD, NetBSD, OmniOS, and other BSD/Illumos VMs in seconds
-- 🚀 **Start / Stop / Destroy** VMs on demand
-- 🔍 **Inspect** VM state, IPs, CPU, memory, and network configuration
-- 💻 **Execute commands** inside running VMs for instant diagnostics
-- 📜 **Read console output** to debug boot failures or system errors
-- 📸 **Snapshot and restore** VMs to safe checkpoints
+- Boot **FreeBSD, OpenBSD, NetBSD, DragonFly BSD, GhostBSD, MidnightBSD, Solaris, OmniOS, OpenIndiana, Tribblix, Haiku, Ubuntu, openEuler, BlissOS (Android), Debian GNU/Hurd, and Plan 9** guests in the background
+- Target **x86_64, aarch64, riscv64, sparc64, powerpc64, s390x** and more (per-OS availability varies)
+- **Execute commands** inside running VMs over SSH for instant diagnostics
+- **Read the serial console** to debug boot failures
+- Map **ports** and sync **folders** (rsync / sshfs / nfs / scp / 9p) between host and guest
+- **Stop** VMs gracefully (guest shutdown with an ACPI fallback) or hard-kill via the QEMU monitor
+
+The VM model mirrors the anyvm CLI: a VM is identified by its OS name plus
+optional release (e.g. `freebsd` + `14.3`), not by user-invented names.
+The first boot of an OS/release downloads the image from the matching
+[anyvm-org builder](https://github.com/anyvm-org) release, so allow several
+minutes; later boots reuse the cached image.
 
 ---
 
@@ -23,10 +29,12 @@ Once installed, your AI assistant can:
 
 | Requirement | Notes |
 |-------------|-------|
-| Python ≥ 3.10 | |
+| Python >= 3.10 | |
+| QEMU | `qemu-system-*` on PATH (anyvm can also self-download pinned builds for some guests) |
+| OpenSSH client | `ssh` on PATH (used for exec/stop) |
 | An MCP-compatible AI assistant | Claude Code, GitHub Copilot in VS Code, or any other MCP client |
 
-> **Note:** The `anyvm` CLI is bundled automatically — no separate installation needed.
+> **Note:** The `anyvm.py` launcher is bundled automatically -- no separate installation needed.
 
 ---
 
@@ -70,9 +78,9 @@ Add the server to `~/.claude/mcp.json` (or the project-level `.claude/mcp.json`)
 
 Restart Claude Code. You can now say things like:
 
-> *"Create a FreeBSD 14 VM called 'dev' with 2 CPUs and 2 GB RAM, then show me its IP."*
+> *"Boot a FreeBSD 14.3 VM with 2 CPUs and 2 GB RAM, then run uname -a in it."*
 
-> *"My OpenBSD VM won't boot. Show me the console output and suggest a fix."*
+> *"My OpenBSD VM won't answer SSH. Show me the serial console output and suggest a fix."*
 
 ### GitHub Copilot (VS Code)
 
@@ -104,11 +112,13 @@ Then point your MCP client at `http://127.0.0.1:8000/sse`.
 ## CLI reference
 
 ```
-usage: anyvm-mcp [-h] [--anyvm PATH] [--transport {stdio,sse,streamable-http}]
-                   [--host HOST] [--port PORT]
+usage: anyvm-mcp [-h] [--anyvm PATH] [--data-dir DIR]
+                 [--transport {stdio,sse,streamable-http}]
+                 [--host HOST] [--port PORT]
 
 options:
-  --anyvm PATH          Path to the anyvm binary (default: bundled version)
+  --anyvm PATH          Path to the anyvm launcher (default: bundled anyvm.py)
+  --data-dir DIR        Directory for images, logs, and VM state (default: ~/.anyvm-mcp)
   --transport           MCP transport: stdio (default), sse, or streamable-http
   --host HOST           Bind host for HTTP transports (default: 127.0.0.1)
   --port PORT           Bind port for HTTP transports (default: 8000)
@@ -120,54 +130,51 @@ options:
 
 | Tool | Description |
 |------|-------------|
-| `list_vms` | List all VMs with state, OS, CPU, RAM, and IP |
-| `vm_info` | Detailed info about a single VM |
-| `create_vm` | Create a new BSD/Illumos VM |
-| `start_vm` | Start a stopped VM |
-| `stop_vm` | Gracefully (or forcefully) stop a running VM |
-| `destroy_vm` | Permanently delete a VM and free its resources |
-| `exec_in_vm` | Run a shell command inside a VM |
-| `console_output` | Fetch the latest VM serial/console log |
-| `list_snapshots` | List snapshots for a VM |
-| `create_snapshot` | Snapshot a VM at its current state |
-| `restore_snapshot` | Roll a VM back to a snapshot |
-| `delete_snapshot` | Delete a snapshot |
-| `network_info` | IPs, MACs, and virtual NIC configuration |
+| `list_supported_os` | Every guest OS anyvm can boot, with notes and SSH user |
+| `start_vm` | Boot a guest in the background (os, release, arch, mem, cpus, ports, volumes, sync) |
+| `list_running_vms` | Registered VMs with a live running/stopped probe |
+| `vm_info` | State, SSH port/user/key, and serial-log path for one VM |
+| `exec_in_vm` | Run a shell command over SSH inside a running VM |
+| `stop_vm` | Graceful guest shutdown (SSH + ACPI fallback); `force` hard-kills via QEMU monitor |
+| `console_output` | Tail the VM serial console log (works even when SSH is down) |
+
+Notes:
+
+- `start_vm` separates OS and release: `os="freebsd", release="14.3"` -- omit
+  `release` for the builder's default release.
+- Plan 9 (9front) guests have no SSH; `exec_in_vm` is unavailable for them.
+  Use `console_output`, or the VNC web console anyvm prints at boot.
+- Haiku's SSH user is `user`; all other guests use `root`.
 
 ---
 
 ## Example conversations
 
-### Creating and inspecting a VM
+### Boot and inspect a VM
 
 ```
-You:      Create an OmniOS VM called "omnios-test" with 4 CPUs, 4 GB RAM, and 40 GB disk.
-Copilot:  ✅ VM "omnios-test" created. State: stopped.
-          Run `start_vm` to boot it.
-
-You:      Start it and tell me its IP address.
-Copilot:  ✅ VM started. IP: 192.168.100.42
+You:      Boot an OmniOS VM with 4 CPUs and 4 GB RAM and show me its uname.
+Copilot:  [calls start_vm(os="omnios", cpus=4, mem_mb=4096)]
+          VM omnios-r151054 is running (ssh -p 42761 root@127.0.0.1).
+          [calls exec_in_vm(os="omnios", command="uname -a")]
+          SunOS omnios 5.11 omnios-r151054 i86pc i386 i86pc
 ```
 
-### Debugging a boot failure
+### Debug a boot failure
 
 ```
-You:      My FreeBSD VM "bsd-web" won't respond to SSH. What's wrong?
-Copilot:  [calls console_output("bsd-web", lines=200)]
-          The console log shows a panic in vtnet0 — likely a driver issue.
-          Try: exec_in_vm("bsd-web", "sysctl hw.vtnet.0.csum_disable=1")
+You:      My NetBSD VM never comes up on SSH. What's wrong?
+Copilot:  [calls console_output(os="netbsd", lines=200)]
+          The console shows the kernel waiting on root device selection...
 ```
 
-### Snapshot workflow
+### Cross-architecture testing
 
 ```
-You:      Snapshot "bsd-web" before I upgrade it.
-Copilot:  [calls create_snapshot("bsd-web", "pre-upgrade", description="before pkg upgrade")]
-          ✅ Snapshot "pre-upgrade" created.
-
-You:      The upgrade broke something. Roll back.
-Copilot:  [calls restore_snapshot("bsd-web", "pre-upgrade")]
-          ✅ Restored to snapshot "pre-upgrade".
+You:      Run my test script on Ubuntu riscv64.
+Copilot:  [calls start_vm(os="ubuntu", arch="riscv64",
+                          volumes=["/home/me/proj:/proj"], sync="rsync")]
+          [calls exec_in_vm(os="ubuntu", command="cd /proj && sh run-tests.sh")]
 ```
 
 ---
@@ -189,4 +196,4 @@ pytest tests/test_vm_manager.py -v
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT -- see [LICENSE](LICENSE).
